@@ -1,0 +1,25 @@
+-- Nexus Bank & Payroll - Pro Max : base schema
+-- Chalane ka tareeka:  mysql -u root -p < schema.sql
+-- Loans / Employees / Payroll tables app pehli baar chalne par khud ban jaati hain.
+-- Fund Transfer & Bulk Payroll ki tables bhi khud ban jaati hain.
+
+CREATE DATABASE IF NOT EXISTS bank_payroll_db;
+USE bank_payroll_db;
+
+CREATE TABLE IF NOT EXISTS Customers (
+    account_number  INT AUTO_INCREMENT PRIMARY KEY,
+    customer_name   VARCHAR(100) NOT NULL,
+    contact_number  VARCHAR(15)  NOT NULL,
+    email           VARCHAR(100),
+    current_balance DECIMAL(15,2) NOT NULL DEFAULT 0,
+    opened_on       DATETIME DEFAULT CURRENT_TIMESTAMP
+) AUTO_INCREMENT = 10001;
+
+CREATE TABLE IF NOT EXISTS Transactions (
+    transaction_id   INT AUTO_INCREMENT PRIMARY KEY,
+    account_number   INT NOT NULL,
+    transaction_type VARCHAR(30) NOT NULL,
+    amount           DECIMAL(15,2) NOT NULL,
+    transaction_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_number) REFERENCES Customers(account_number)
+);

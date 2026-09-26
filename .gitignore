@@ -1,0 +1,26 @@
+# Secrets - kabhi GitHub par mat daalo
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+*.spec
+
+# Generated files
+*.pdf
+*.csv
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+  .env
+  venv/
+  __pycache__/
+  *.dll
