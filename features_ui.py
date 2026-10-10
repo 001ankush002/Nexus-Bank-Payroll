@@ -7,6 +7,7 @@ import customtkinter as ctk
 
 import config as cfg
 import features_db as fdb
+import undo_db
 
 
 def _tree(parent, columns, height=8):
@@ -100,7 +101,15 @@ class TransferFrame(ctk.CTkFrame):
             ref = fdb.transfer_funds(src, dst, amount, self.rem.get().strip())
         except Exception as e:
             return messagebox.showerror("Transfer Failed", str(e))
-        messagebox.showinfo("Success", f"Transfer ho gaya!\nReference: {ref}")
+        try:
+            undo_db.log("transfer", src, amount, counterparty=dst,
+                        description=f"Transfer {ref}: {src} → {dst}")
+        except Exception:
+            pass  # undo table na bane to bhi asal transfer fail nahi hoga
+        messagebox.showinfo(
+            "Success",
+            f"Transfer ho gaya!\nReference: {ref}\n\n"
+            f"Undo available for {undo_db.WINDOW_SECONDS}s from the Undo Window page.")
         for w in (self.src, self.dst, self.amt, self.rem):
             w.delete(0, "end")
         self.load()

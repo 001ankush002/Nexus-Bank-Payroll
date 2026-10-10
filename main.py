@@ -19,6 +19,10 @@ import config as cfg
 import loan_calc
 from db import BankError, Database, DatabaseError
 from features_ui import TransferFrame, BulkPayrollFrame
+from undo_ui import UndoFrame
+import undo_db
+from dispute_ui import DisputeFrame
+import dispute_db
 from payslip import calculate_salary, generate_salary_slip
 from utils import (format_inr, is_valid_email, is_valid_phone,
                    parse_amount, parse_id, shade)
@@ -41,10 +45,18 @@ TXN_TAGS = {
     "Loan Closure": "debit",
     "Transfer In": "credit",
     "Transfer Out": "debit",
+    "Deposit Undo": "debit",
+    "Withdraw Undo": "credit",
+    "Transfer Undo In": "credit",
+    "Transfer Undo Out": "debit",
+    "Loan EMI Undo": "credit",
+    "Dispute Resolved (Credit)": "credit",
+    "Dispute Resolved (Debit)": "debit",
 }
 
 # in types se account balance kam hota hai (statement me '-' aur running balance ghatta hai)
-DEBIT_TYPES = {"Withdraw", "Loan EMI", "Loan Part-Payment", "Loan Closure", "Transfer Out"}
+DEBIT_TYPES = {"Withdraw", "Loan EMI", "Loan Part-Payment", "Loan Closure", "Transfer Out",
+              "Deposit Undo", "Transfer Undo Out", "Dispute Resolved (Debit)"}
 
 # login screen ke left panel ka gradient (top -> bottom)
 LOGIN_GRADIENT = ("#0a2342", "#1f5fae")
@@ -374,6 +386,8 @@ class BankPayrollApp(ctk.CTk):
             ("add_employee", "👔 Add Employee", self.show_add_employee),
             ("transactions", "💸 Deposit / Withdraw", self.show_transactions),
             ("transfer", "🔁 Fund Transfer", self.show_transfer),
+            ("undo", "↩ Undo Window", self.show_undo),
+            ("dispute", "🚩 Dispute Center", self.show_dispute_center),
             ("statement", "📄 Mini Statement", self.show_statement),
             ("payroll", "💼 Process Payroll", self.show_payroll),
             ("bulk_payroll", "🧾 Bulk Payroll", self.show_bulk_payroll),
@@ -746,9 +760,21 @@ class BankPayrollApp(ctk.CTk):
         self._button(btns, "Withdraw Money", lambda: self._do_txn("Withdraw"), cfg.RED,
                      210, 42).pack(side="left")
 
-    def _show_account_info(self, name, balance):
+    def _show_account_info(self, name, balance, account_number=None):
         self.t_name.configure(text=name)
-        self.t_bal.configure(text=f"Balance: {format_inr(balance)}", text_color=cfg.GREEN)
+        held = Decimal("0")
+        if account_number is not None:
+            try:
+                held = dispute_db.held_amount(account_number)
+            except Exception:
+                pass
+        if held > 0:
+            self.t_bal.configure(
+                text=f"Balance: {format_inr(balance)}   •   🚩 {format_inr(held)} frozen (open disputes)   "
+                     f"•   Available: {format_inr(balance - held)}",
+                text_color=cfg.ORANGE)
+        else:
+            self.t_bal.configure(text=f"Balance: {format_inr(balance)}", text_color=cfg.GREEN)
 
     def _txn_search(self):
         ok, customer = self._guard(
@@ -756,12 +782,19 @@ class BankPayrollApp(ctk.CTk):
         if ok:
             self._show_account_info(
                 f"{customer['customer_name']}  (A/C {customer['account_number']})",
-                customer["current_balance"])
+                customer["current_balance"], customer["account_number"])
 
     def _do_txn(self, kind):
         def work():
             acc = parse_id(self.t_account.get(), "account number")
             amount = parse_amount(self.t_amount.get())
+            if kind == "Withdraw":
+                avail = dispute_db.available_balance(acc)
+                if amount > avail:
+                    held = dispute_db.held_amount(acc)
+                    raise ValueError(
+                        f"Insufficient available balance. Only {format_inr(avail)} is free to withdraw "
+                        f"({format_inr(held)} is frozen due to open disputes).")
             result = self.db.deposit(acc, amount) if kind == "Deposit" else self.db.withdraw(acc, amount)
             return acc, amount, result
 
@@ -769,11 +802,17 @@ class BankPayrollApp(ctk.CTk):
         if not ok:
             return
         acc, amount, result = res
-        self._show_account_info(f"{result['customer_name']}  (A/C {acc})", result["balance"])
+        self._show_account_info(f"{result['customer_name']}  (A/C {acc})", result["balance"], acc)
         self.t_amount.delete(0, "end")
+        try:
+            undo_db.log(kind.lower(), acc, amount,
+                        description=f"{kind} of {format_inr(amount)} on account {acc}")
+        except Exception:
+            pass  # undo table na bane to bhi asal transaction fail nahi hoga
         messagebox.showinfo(
             "Success",
-            f"{kind} of {format_inr(amount)} successful!\nNew balance: {format_inr(result['balance'])}")
+            f"{kind} of {format_inr(amount)} successful!\nNew balance: {format_inr(result['balance'])}\n\n"
+            f"Undo available for {undo_db.WINDOW_SECONDS}s from the Undo Window page.")
 
     # ==================================================
     # 5b. FUND TRANSFER  &  BULK PAYROLL  (features_ui.py se)
@@ -791,6 +830,20 @@ class BankPayrollApp(ctk.CTk):
             BulkPayrollFrame(self.main_frame).pack(fill="both", expand=True)
         except Exception as exc:
             messagebox.showerror("Bulk Payroll", f"Could not open this page.\n\n{exc}")
+
+    def show_undo(self):
+        self.clear_main_frame("undo")
+        try:
+            UndoFrame(self.main_frame).pack(fill="both", expand=True)
+        except Exception as exc:
+            messagebox.showerror("Undo Window", f"Could not open this page.\n\n{exc}")
+
+    def show_dispute_center(self):
+        self.clear_main_frame("dispute")
+        try:
+            DisputeFrame(self.main_frame).pack(fill="both", expand=True)
+        except Exception as exc:
+            messagebox.showerror("Dispute Center", f"Could not open this page.\n\n{exc}")
 
     # ==================================================
     # 6. MINI STATEMENT
@@ -1376,6 +1429,16 @@ class BankPayrollApp(ctk.CTk):
         inst = loan_calc.next_installment(
             loan["outstanding_amount"], loan["interest_rate"], loan["emi_amount"],
             loan["emis_paid"], loan["tenure_months"])
+        try:
+            avail = dispute_db.available_balance(loan["account_number"])
+        except Exception:
+            avail = loan["account_balance"]
+        if inst["payment"] > avail:
+            held = dispute_db.held_amount(loan["account_number"])
+            return messagebox.showerror(
+                "Insufficient Available Balance",
+                f"Only {format_inr(avail)} is free to spend on account {loan['account_number']} "
+                f"({format_inr(held)} is frozen due to open disputes).\nEMI due: {format_inr(inst['payment'])}")
         if not messagebox.askyesno(
                 "Confirm EMI Payment",
                 f"Pay EMI {loan['emis_paid'] + 1} of {loan['tenure_months']} for loan #{loan['loan_id']}?\n\n"
@@ -1383,14 +1446,21 @@ class BankPayrollApp(ctk.CTk):
                 f"   Interest  : {format_inr(inst['interest'])}\n"
                 f"   Principal : {format_inr(inst['principal'])}\n\n"
                 f"Debit from account {loan['account_number']} ({loan['customer_name']})\n"
-                f"Available balance: {format_inr(loan['account_balance'])}"):
+                f"Available balance: {format_inr(avail)}"):
             return
         ok, res = self._guard(lambda: self.db.repay_emi(loan["loan_id"]))
         if not ok:
             return
+        try:
+            undo_db.log("emi", loan["account_number"], res["payment"], loan_id=loan["loan_id"],
+                        loan_snapshot=loan,
+                        description=f"EMI on loan #{loan['loan_id']} ({loan['customer_name']})")
+        except Exception:
+            pass  # undo table na bane to bhi asal payment fail nahi hoga
         text = (f"EMI of {format_inr(res['payment'])} paid.\n"
                 f"Outstanding principal: {format_inr(res['outstanding'])}\n"
-                f"Account balance: {format_inr(res['balance'])}")
+                f"Account balance: {format_inr(res['balance'])}\n\n"
+                f"Undo available for {undo_db.WINDOW_SECONDS}s from the Undo Window page.")
         if res["closed"]:
             text = "That was the final EMI - the loan is now CLOSED. 🎉\n\n" + text
         messagebox.showinfo("EMI Paid", text)
